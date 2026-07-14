@@ -1,0 +1,244 @@
+# Stable Home Assistant surface for the dynamic scheduler. Schedule and row
+# configuration is intentionally managed through the structured web API.
+
+text_sensor:
+  - platform: template
+    id: irrigation_state
+    name: "${friendly_name} State"
+    icon: mdi:sprinkler
+    update_interval: never
+
+  - platform: template
+    id: irrigation_status_reason
+    name: "${friendly_name} Last Decision"
+    icon: mdi:message-text
+    update_interval: never
+
+  - platform: template
+    id: selected_schedule_name
+    name: "${friendly_name} Selected Schedule Name"
+    icon: mdi:calendar-text
+    update_interval: 5s
+    lambda: |-
+      static std::string previous;
+      const auto current = id(dynamic_scheduler).selected_schedule_name();
+      if (current == previous) return {};
+      previous = current;
+      return current;
+
+  - platform: template
+    id: selected_schedule_details
+    name: "${friendly_name} Selected Schedule Details"
+    icon: mdi:calendar-clock
+    update_interval: 5s
+    lambda: |-
+      static std::string previous;
+      const auto current = id(dynamic_scheduler).selected_schedule_details();
+      if (current == previous) return {};
+      previous = current;
+      return current;
+
+  - platform: template
+    id: next_schedule_name
+    name: "${friendly_name} Next Schedule"
+    icon: mdi:calendar-arrow-right
+    update_interval: 30s
+    lambda: |-
+      static std::string previous;
+      const auto current = id(dynamic_scheduler).next_schedule_name();
+      if (current == previous) return {};
+      previous = current;
+      return current;
+
+  - platform: template
+    id: next_schedule_start
+    name: "${friendly_name} Next Schedule Start"
+    icon: mdi:calendar-clock
+    update_interval: 30s
+    lambda: |-
+      static std::string previous;
+      const auto current = id(dynamic_scheduler).next_schedule_start();
+      if (current == previous) return {};
+      previous = current;
+      return current;
+
+sensor:
+  - platform: template
+    id: active_row_remaining
+    name: "${friendly_name} Active Row Remaining"
+    icon: mdi:timer-sand
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    update_interval: never
+
+  - platform: template
+    id: saved_schedule_count
+    name: "${friendly_name} Saved Schedule Count"
+    icon: mdi:calendar-multiple
+    accuracy_decimals: 0
+    update_interval: 10s
+    lambda: return (float) id(dynamic_scheduler).schedule_count();
+    filters:
+      - delta: 1
+
+  - platform: template
+    id: next_schedule_in_seconds
+    name: "${friendly_name} Next Schedule In"
+    icon: mdi:timer-outline
+    unit_of_measurement: s
+    accuracy_decimals: 0
+    update_interval: 30s
+    lambda: return (float) id(dynamic_scheduler).next_schedule_seconds();
+
+number:
+  - platform: template
+    id: manual_run_duration_min
+    name: "${friendly_name} Quick Manual Duration"
+    icon: mdi:timer-play
+    entity_category: config
+    unit_of_measurement: min
+    min_value: 1
+    max_value: 60
+    step: 1
+    initial_value: ${manual_run_duration_min}
+    restore_value: true
+    optimistic: true
+
+select:
+  - platform: template
+    id: selected_schedule_position
+    name: "${friendly_name} Saved Schedule"
+    icon: mdi:calendar-search
+    options:
+      - "01"
+      - "02"
+      - "03"
+      - "04"
+      - "05"
+      - "06"
+      - "07"
+      - "08"
+      - "09"
+      - "10"
+      - "11"
+      - "12"
+      - "13"
+      - "14"
+      - "15"
+      - "16"
+      - "17"
+      - "18"
+      - "19"
+      - "20"
+      - "21"
+      - "22"
+      - "23"
+      - "24"
+      - "25"
+      - "26"
+      - "27"
+      - "28"
+      - "29"
+      - "30"
+      - "31"
+      - "32"
+    initial_option: "01"
+    optimistic: true
+    set_action:
+      - lambda: id(dynamic_scheduler).select_schedule_ordinal((uint8_t) atoi(x.c_str()));
+
+  - platform: template
+    id: controller_timezone
+    name: "${friendly_name} Timezone"
+    icon: mdi:map-clock-outline
+    entity_category: config
+    internal: true
+    options:
+      - Europe/Budapest
+      - UTC
+      - Europe/London
+      - Europe/Berlin
+      - Europe/Paris
+      - Europe/Madrid
+      - Europe/Rome
+      - America/New_York
+      - America/Chicago
+      - America/Denver
+      - America/Los_Angeles
+    initial_option: ${timezone}
+    restore_value: true
+    optimistic: true
+    set_action:
+      - script.execute: apply_timezone_setting
+
+script:
+  - id: apply_timezone_setting
+    mode: restart
+    then:
+      - lambda: |-
+          std::string selected = id(controller_timezone).current_option().str();
+          const char *tz = "CET-1CEST,M3.5.0,M10.5.0/3";
+          if (selected == "UTC") tz = "UTC0";
+          else if (selected == "Europe/London") tz = "GMT0BST,M3.5.0/1,M10.5.0";
+          else if (selected == "America/New_York") tz = "EST5EDT,M3.2.0,M11.1.0";
+          else if (selected == "America/Chicago") tz = "CST6CDT,M3.2.0,M11.1.0";
+          else if (selected == "America/Denver") tz = "MST7MDT,M3.2.0,M11.1.0";
+          else if (selected == "America/Los_Angeles") tz = "PST8PDT,M3.2.0,M11.1.0";
+          id(sprinkler_time).set_timezone(tz);
+          setenv("TZ", tz, 1);
+          tzset();
+
+button:
+  - platform: template
+    name: "${friendly_name} Emergency Stop"
+    icon: mdi:stop-circle
+    on_press:
+      - lambda: id(dynamic_scheduler).emergency_stop("Manual emergency stop");
+
+  - platform: template
+    name: "${friendly_name} Pause"
+    icon: mdi:pause-circle
+    on_press:
+      - lambda: id(dynamic_scheduler).pause();
+
+  - platform: template
+    name: "${friendly_name} Resume"
+    icon: mdi:play-circle
+    on_press:
+      - lambda: id(dynamic_scheduler).resume();
+
+  - platform: template
+    name: "${friendly_name} Skip Row"
+    icon: mdi:skip-next-circle
+    on_press:
+      - lambda: id(dynamic_scheduler).skip_row();
+
+  - platform: template
+    name: "${friendly_name} Run Selected Schedule"
+    icon: mdi:play-circle
+    on_press:
+      - lambda: id(dynamic_scheduler).run_selected_schedule();
+
+binary_sensor:
+  - platform: template
+    id: schedule_active
+    name: "${friendly_name} Schedule Active"
+    lambda: return id(dynamic_scheduler).is_active();
+
+  - platform: template
+    id: row_running
+    name: "${friendly_name} Row Running"
+    internal: true
+    lambda: return id(dynamic_scheduler).is_active() && !id(dynamic_scheduler).is_paused();
+
+switch:
+  - platform: template
+    id: selected_schedule_enabled
+    name: "${friendly_name} Selected Schedule Enabled"
+    icon: mdi:calendar-check
+    optimistic: true
+    restore_mode: DISABLED
+    turn_on_action:
+      - lambda: id(dynamic_scheduler).set_selected_schedule_enabled(true);
+    turn_off_action:
+      - lambda: id(dynamic_scheduler).set_selected_schedule_enabled(false);

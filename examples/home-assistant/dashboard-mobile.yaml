@@ -1,0 +1,125 @@
+# Compact Lovelace import artifact for the supplied eight-zone example.
+# Entity IDs and the iframe IP match the development example; replace them after
+# discovery. Add/remove manual-run cards for a different zone count.
+title: Sprinkler Controller Mobile
+views:
+  - title: Sprinkler
+    path: sprinkler-mobile
+    icon: mdi:sprinkler
+    cards:
+      - type: entities
+        title: Current Run
+        show_header_toggle: false
+        entities:
+          - entity: text_sensor.sprinkler_controller_sprinkler_controller_state
+            name: State
+          - entity: sensor.sprinkler_controller_sprinkler_controller_active_row_remaining
+            name: Remaining
+          - entity: binary_sensor.sprinkler_controller_sprinkler_controller_schedule_active
+            name: Active
+          - entity: text_sensor.sprinkler_controller_sprinkler_controller_last_decision
+            name: Last Decision
+
+      - type: grid
+        columns: 4
+        square: false
+        cards:
+          - type: button
+            entity: button.sprinkler_controller_sprinkler_controller_pause
+            name: Pause
+            icon: mdi:pause-circle
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_sprinkler_controller_resume
+            name: Resume
+            icon: mdi:play-circle
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_sprinkler_controller_skip_row
+            name: Skip
+            icon: mdi:skip-next-circle
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_sprinkler_controller_emergency_stop
+            name: Stop
+            icon: mdi:stop-circle
+            show_state: false
+
+      - type: entities
+        title: Next Schedule
+        show_header_toggle: false
+        entities:
+          - entity: text_sensor.sprinkler_controller_sprinkler_controller_next_schedule
+            name: Program
+          - entity: text_sensor.sprinkler_controller_sprinkler_controller_next_schedule_start
+            name: Start
+          - entity: sensor.sprinkler_controller_sprinkler_controller_next_schedule_in
+            name: Starts In
+
+      - type: entities
+        title: Saved Schedules
+        show_header_toggle: false
+        entities:
+          - entity: sensor.sprinkler_controller_sprinkler_controller_saved_schedule_count
+            name: Saved
+          - entity: select.sprinkler_controller_sprinkler_controller_saved_schedule
+            name: Position
+          - entity: text_sensor.sprinkler_controller_sprinkler_controller_selected_schedule_name
+            name: Selected
+          - entity: text_sensor.sprinkler_controller_sprinkler_controller_selected_schedule_details
+            name: Details
+          - entity: switch.sprinkler_controller_sprinkler_controller_selected_schedule_enabled
+            name: Enabled
+          - entity: button.sprinkler_controller_sprinkler_controller_run_selected_schedule
+            name: Run Selected
+      - type: button
+        name: Schedule Editor
+        icon: mdi:web
+        show_state: false
+        tap_action:
+          action: url
+          url_path: http://192.168.1.50/
+
+      - type: entities
+        title: Quick Manual Run
+        show_header_toggle: false
+        entities:
+          - entity: number.sprinkler_controller_sprinkler_controller_quick_manual_duration
+            name: Duration
+
+      - type: grid
+        columns: 2
+        square: false
+        cards:
+          - type: button
+            entity: button.sprinkler_controller_zone_1_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_2_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_3_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_4_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_5_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_6_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_7_manual_run
+            icon: mdi:sprinkler
+            show_state: false
+          - type: button
+            entity: button.sprinkler_controller_zone_8_manual_run
+            icon: mdi:sprinkler
+            show_state: false

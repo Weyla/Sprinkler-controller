@@ -1,0 +1,13 @@
+.esphome/
+.venv/
+build/
+*.bin
+*.elf
+*.map
+*.ota.bin
+*.factory.bin
+__pycache__/
+*.pyc
+**/secrets.yaml
+development/local.yaml
+backups/

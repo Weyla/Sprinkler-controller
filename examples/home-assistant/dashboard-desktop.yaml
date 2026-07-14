@@ -1,0 +1,160 @@
+# Lovelace import artifact for the supplied eight-zone example configuration.
+# The scheduler and native HA bridge create buttons for every zone configured
+# in the example YAML. Entity IDs and the iframe IP below match the supplied
+# example configuration; replace them after Home Assistant discovers your device.
+# Add/remove matching manual-run cards when using a different zone count.
+title: Sprinkler Controller
+views:
+  - title: Sprinkler
+    path: sprinkler
+    icon: mdi:sprinkler
+    type: sections
+    max_columns: 3
+    sections:
+      - type: grid
+        cards:
+          - type: heading
+            heading: Current Run
+            icon: mdi:sprinkler
+          - type: tile
+            entity: text_sensor.sprinkler_controller_sprinkler_controller_state
+            name: State
+            vertical: false
+          - type: tile
+            entity: sensor.sprinkler_controller_sprinkler_controller_active_row_remaining
+            name: Remaining
+            vertical: false
+          - type: tile
+            entity: binary_sensor.sprinkler_controller_sprinkler_controller_schedule_active
+            name: Active
+            vertical: false
+          - type: tile
+            entity: text_sensor.sprinkler_controller_sprinkler_controller_last_decision
+            name: Last Decision
+            vertical: false
+          - type: grid
+            columns: 4
+            square: false
+            cards:
+              - type: button
+                entity: button.sprinkler_controller_sprinkler_controller_pause
+                name: Pause
+                icon: mdi:pause-circle
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_sprinkler_controller_resume
+                name: Resume
+                icon: mdi:play-circle
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_sprinkler_controller_skip_row
+                name: Skip
+                icon: mdi:skip-next-circle
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_sprinkler_controller_emergency_stop
+                name: Stop
+                icon: mdi:stop-circle
+                show_state: false
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Next Schedule
+            icon: mdi:calendar-arrow-right
+          - type: tile
+            entity: text_sensor.sprinkler_controller_sprinkler_controller_next_schedule
+            name: Program
+            vertical: false
+          - type: tile
+            entity: text_sensor.sprinkler_controller_sprinkler_controller_next_schedule_start
+            name: Start
+            vertical: false
+          - type: tile
+            entity: sensor.sprinkler_controller_sprinkler_controller_next_schedule_in
+            name: Starts In
+            vertical: false
+          - type: tile
+            entity: sensor.sprinkler_controller_sprinkler_controller_saved_schedule_count
+            name: Saved
+            vertical: false
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Saved Schedules
+            icon: mdi:calendar-check
+          - type: tile
+            entity: select.sprinkler_controller_sprinkler_controller_saved_schedule
+            name: Position
+            vertical: false
+          - type: tile
+            entity: text_sensor.sprinkler_controller_sprinkler_controller_selected_schedule_name
+            name: Selected
+            vertical: false
+          - type: tile
+            entity: text_sensor.sprinkler_controller_sprinkler_controller_selected_schedule_details
+            name: Details
+            vertical: false
+          - type: tile
+            entity: switch.sprinkler_controller_sprinkler_controller_selected_schedule_enabled
+            name: Enabled
+            vertical: false
+          - type: button
+            entity: button.sprinkler_controller_sprinkler_controller_run_selected_schedule
+            name: Run Selected
+            icon: mdi:play-circle
+            show_state: false
+          - type: button
+            name: Schedule Editor
+            icon: mdi:web
+            show_state: false
+            tap_action:
+              action: url
+              url_path: http://192.168.1.50/
+
+      - type: grid
+        cards:
+          - type: heading
+            heading: Quick Manual Run
+            icon: mdi:timer-play
+          - type: tile
+            entity: number.sprinkler_controller_sprinkler_controller_quick_manual_duration
+            name: Duration
+            vertical: false
+          - type: grid
+            columns: 4
+            square: false
+            cards:
+              - type: button
+                entity: button.sprinkler_controller_zone_1_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_2_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_3_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_4_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_5_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_6_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_7_manual_run
+                icon: mdi:sprinkler
+                show_state: false
+              - type: button
+                entity: button.sprinkler_controller_zone_8_manual_run
+                icon: mdi:sprinkler
+                show_state: false

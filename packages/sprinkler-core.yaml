@@ -1,0 +1,36 @@
+# Reusable sprinkler behavior fetched by a user-owned ESPHome configuration.
+# Installation, networking, hardware, relay, zone and weather configuration
+# deliberately belongs in the user's main YAML.
+
+substitutions:
+  friendly_name: "Sprinkler Controller"
+  sprinkler_version: "v1.0.0"
+  timezone: "UTC"
+  manual_run_duration_min: "2"
+
+esphome:
+  min_version: 2026.6.5
+  project:
+    name: weyla.sprinkler-controller
+    version: ${sprinkler_version}
+  on_boot:
+    # Relay restore modes should already request off. This late hook also
+    # clears scheduler state after all configured components are available.
+    priority: -100
+    then:
+      - lambda: id(dynamic_scheduler).emergency_stop("Boot safety shutdown");
+      - script.execute: apply_timezone_setting
+
+web_server:
+  version: 3
+  # dynamic_sprinkler embeds these assets from its Git checkout. Keeping URLs
+  # local avoids a runtime Internet or CDN dependency.
+  css_url: /0.css
+  js_url: /0.js
+  include_internal: false
+  ota: false
+  log: false
+  compression: gzip
+
+packages:
+  runtime: !include runtime.yaml

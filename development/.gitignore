@@ -1,0 +1,4 @@
+# Local development credentials and ESPHome build output.
+.esphome/
+local.yaml
+secrets.yaml
