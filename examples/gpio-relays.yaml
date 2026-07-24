@@ -9,7 +9,7 @@ substitutions:
   # Keep both Git users on the same ref. Release tags are recommended for an
   # installed controller. Use master only for the latest published code.
   sprinkler_repository: https://github.com/Weyla/Sprinkler-controller
-  sprinkler_version: v1.1.0
+  sprinkler_version: v1.1.1
   # CHANGE: device identity and physical location.
   device_name: sprinkler-controller
   friendly_name: Sprinkler Controller

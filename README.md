@@ -5,7 +5,7 @@ Home Assistant integration, and an authenticated local web interface. It
 supports 1-32 zones using either the included Dingtian shift-register driver or
 ordinary ESPHome switches.
 
-The current stable release is `v1.1.0`. Installed controllers should use a
+The current stable release is `v1.1.1`. Installed controllers should use a
 versioned release tag; `master` contains the latest published code. Development
 branches are kept private until they are ready to release.
 
@@ -31,7 +31,7 @@ Users need only one main YAML in ESPHome Device Builder:
    existing firmware already accepts ESPHome OTA with the configured password.
 5. Open `http://DEVICE_IP/` and sign in with the configured web credentials.
 
-The examples use `sprinkler_version: v1.1.0`. That single value selects both
+The examples use `sprinkler_version: v1.1.1`. That single value selects both
 the remote package and external-component revision. To update later, change it
 to a newer release tag and install again. Use `master` only when you explicitly
 want the latest published code instead of an immutable release.
@@ -45,7 +45,7 @@ Releases use semantic version numbers:
 - major releases such as `v2.0.0` may require configuration or storage changes.
 
 Git tags are immutable snapshots, so an ESPHome configuration pinned to
-`v1.1.0` keeps building the same source. Read the release notes, replace
+`v1.1.1` keeps building the same source. Read the release notes, replace
 `sprinkler_version` with the desired newer tag, validate the configuration, and
 select **Install** in ESPHome Device Builder. Keep a backup export before an
 update that changes stored schedules or settings.

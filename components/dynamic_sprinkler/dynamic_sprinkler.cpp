@@ -348,8 +348,11 @@ bool DynamicSprinkler::load_serialized_history_(uint8_t slot) {
 }
 
 bool DynamicSprinkler::save_serialized_activity_() {
-  std::array<uint8_t, ACTIVITY_BLOB_SIZE> blob{};
-  StorageWriter writer(blob.data(), blob.size());
+  // These buffers total about 5 KB. Keep them off ESPHome's 8 KB loop/setup
+  // stack so activity persistence cannot overflow it during boot or run finish.
+  auto blob = std::make_unique<std::array<uint8_t, ACTIVITY_BLOB_SIZE>>();
+  blob->fill(0);
+  StorageWriter writer(blob->data(), blob->size());
   writer.u32(0x44534143); writer.u16(1); writer.u16(0); writer.u32(0);
   writer.u32(this->activity_store_.marker);
   writer.u8(this->activity_store_.head);
@@ -369,19 +372,19 @@ bool DynamicSprinkler::save_serialized_activity_() {
     writer.u8(entry.manual);
     writer.u8((uint8_t) entry.reason);
   }
-  return finish_blob(blob, writer) && this->serialized_activity_pref_.save(&blob);
+  return finish_blob(*blob, writer) && this->serialized_activity_pref_.save(blob.get());
 }
 
 bool DynamicSprinkler::load_serialized_activity_() {
-  std::array<uint8_t, ACTIVITY_BLOB_SIZE> blob{};
-  if (!this->serialized_activity_pref_.load(&blob)) return false;
+  auto blob = std::make_unique<std::array<uint8_t, ACTIVITY_BLOB_SIZE>>();
+  if (!this->serialized_activity_pref_.load(blob.get())) return false;
   StorageReader reader(nullptr, 0);
-  if (!open_blob(blob, 0x44534143, 1, reader)) return false;
-  ActivityStore decoded{};
-  decoded.marker = reader.u32();
-  decoded.head = reader.u8();
-  decoded.count = reader.u8();
-  for (auto &entry : decoded.records) {
+  if (!open_blob(*blob, 0x44534143, 1, reader)) return false;
+  auto decoded = std::make_unique<ActivityStore>();
+  decoded->marker = reader.u32();
+  decoded->head = reader.u8();
+  decoded->count = reader.u8();
+  for (auto &entry : decoded->records) {
     entry.marker = reader.u32();
     entry.run_id = reader.u32();
     entry.schedule_id = reader.u32();
@@ -400,10 +403,10 @@ bool DynamicSprinkler::load_serialized_activity_() {
          entry.reason > ActivityStopReason::STOPPED))
       return false;
   }
-  if (!reader.ok() || decoded.marker != ACTIVITY_STORE_MARKER || decoded.head >= ACTIVITY_SIZE ||
-      decoded.count > ACTIVITY_SIZE)
+  if (!reader.ok() || decoded->marker != ACTIVITY_STORE_MARKER || decoded->head >= ACTIVITY_SIZE ||
+      decoded->count > ACTIVITY_SIZE)
     return false;
-  this->activity_store_ = decoded;
+  this->activity_store_ = *decoded;
   return true;
 }
 

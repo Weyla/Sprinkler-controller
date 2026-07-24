@@ -4,7 +4,7 @@
 
 substitutions:
   friendly_name: "Sprinkler Controller"
-  sprinkler_version: "v1.1.0"
+  sprinkler_version: "v1.1.1"
   timezone: "UTC"
   manual_run_duration_min: "2"
 
