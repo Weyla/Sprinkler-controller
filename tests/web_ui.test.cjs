@@ -24,7 +24,9 @@ class Element {
   querySelector(selector) { return this.children.get(selector) || null; }
 }
 
-function loadApp() {
+function loadApp(fetchImpl = async () => {
+  throw new Error("Unexpected fetch");
+}) {
   const elements = new Map();
   const weather = new Map();
   const document = {
@@ -51,13 +53,14 @@ function loadApp() {
     AbortController,
     Blob,
     TextEncoder,
+    fetch: fetchImpl,
     setTimeout,
     clearTimeout,
     setInterval() {},
     confirm() { return true; },
   });
   const source = fs.readFileSync(path.join(__dirname, "../web/dynamic_app.js"), "utf8");
-  vm.runInContext(`${source}\n;globalThis.__test = { appState, updateRuntime, statusHasSettled, skipStatusHasSettled };`, context);
+  vm.runInContext(`${source}\n;globalThis.__test = { appState, updateRuntime, statusHasSettled, skipStatusHasSettled, loadHistory, loadOlderRuns, renderHistory };`, context);
   return { ...context.__test, document, elements, weather };
 }
 
@@ -132,4 +135,84 @@ test("a new run sequence resets monotonic timer anchors", () => {
   updateRuntime();
   assert.equal(appState.displayElapsed, 0.25);
   assert.equal(appState.displayRemaining, 8);
+});
+
+test("activity history loads bounded pages and appends older intervals", async () => {
+  const requests = [];
+  const pages = new Map([
+    [0, {
+      activity: [{
+        run_id: 8,
+        schedule_id: 2,
+        name: "Morning",
+        manual: false,
+        round: 1,
+        row: 1,
+        zone_id: 1,
+        zone_name: "Front",
+        started_at: 100,
+        watered_ms: 5000,
+        active: false,
+        result: "Completed",
+        commanded_on: "0x00000001",
+        commanded_off: "0x00000000",
+      }],
+      total: 2,
+      next_offset: 1,
+    }],
+    [1, {
+      activity: [{
+        run_id: 7,
+        schedule_id: 0,
+        name: "Manual run",
+        manual: true,
+        round: 1,
+        row: 1,
+        zone_id: 2,
+        zone_name: "Back",
+        started_at: 50,
+        watered_ms: 3000,
+        active: false,
+        result: "Stopped",
+        commanded_on: "0x00000002",
+        commanded_off: "0x00000000",
+      }],
+      total: 2,
+      next_offset: null,
+    }],
+  ]);
+  const fetchImpl = async (url) => {
+    const path = url.pathname.split("/").pop();
+    const offset = Number(url.searchParams.get("offset"));
+    requests.push({ path, offset, limit: Number(url.searchParams.get("limit")) });
+    if (path === "history") {
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({
+          history: [{ name: "Morning", started_at: 100, watered_seconds: 5, result: "Completed" }],
+          total: 1,
+          next_offset: null,
+        }),
+      };
+    }
+    return { ok: true, status: 200, json: async () => pages.get(offset) };
+  };
+  const { appState, loadHistory, document } = loadApp(fetchImpl);
+
+  await loadHistory(true);
+  assert.equal(appState.history.length, 1);
+  assert.equal(appState.historyNextOffset, 1);
+  assert.equal(appState.runHistory.length, 1);
+  assert.match(document.getElementById("view-history").innerHTML, /Morning/);
+
+  await loadHistory(false);
+  assert.equal(appState.history.length, 2);
+  assert.equal(appState.historyNextOffset, null);
+  assert.deepEqual(requests, [
+    { path: "activity", offset: 0, limit: 10 },
+    { path: "history", offset: 0, limit: 10 },
+    { path: "activity", offset: 1, limit: 10 },
+  ]);
+  assert.match(document.getElementById("view-history").innerHTML, /Manual run/);
 });

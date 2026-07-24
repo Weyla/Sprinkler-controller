@@ -27,6 +27,13 @@ const appState = {
   status: null,
   statusReceivedAt: 0,
   history: [],
+  historyReceivedAt: 0,
+  historyNextOffset: null,
+  historyTotal: 0,
+  historyLoading: false,
+  runHistory: [],
+  runHistoryNextOffset: null,
+  runHistoryTotal: 0,
   system: null,
   zoneNames: [],
   zoneIds: [],
@@ -896,14 +903,62 @@ async function startManual() {
 
 function renderHistory() {
   const container = document.getElementById("view-history");
+  const rows = appState.history.map((entry) => {
+    const started = entry.started_at ? new Date(entry.started_at * 1000).toLocaleString() : "-";
+    const position = `Round ${entry.round}, row ${entry.row}`;
+    const masks = `${entry.commanded_on || "-"} → ${entry.commanded_off || "-"}`;
+    return `<tr>
+      <td><strong>${escapeHtml(entry.name)}</strong><br><span class="table-detail">${entry.manual ? "Manual" : `Schedule ${entry.schedule_id}`}</span></td>
+      <td>${escapeHtml(entry.zone_name)} <span class="table-detail">(#${entry.zone_id})</span></td>
+      <td>${escapeHtml(position)}</td>
+      <td>${escapeHtml(started)}</td>
+      <td data-activity-duration data-active="${entry.active ? "1" : "0"}" data-watered-ms="${Number(entry.watered_ms) || 0}">${entry.active ? "Currently running" : formatClock((Number(entry.watered_ms) || 0) / 1000)}</td>
+      <td>${escapeHtml(entry.result)}</td>
+      <td><code>${escapeHtml(masks)}</code></td>
+    </tr>`;
+  }).join("");
+  const runRows = appState.runHistory.map((entry) => `
+    <tr>
+      <td>${escapeHtml(entry.name)}</td>
+      <td>${entry.started_at ? new Date(entry.started_at * 1000).toLocaleString() : "-"}</td>
+      <td>${formatClock(entry.watered_seconds)}</td>
+      <td>${escapeHtml(entry.result)}</td>
+    </tr>`).join("");
   container.innerHTML = `
     <article class="panel">
-      <div class="panel-header"><h2>Run History</h2><button id="refresh-history" class="btn">Refresh</button></div>
+      <div class="panel-header"><h2>Zone Activity</h2><button id="refresh-history" class="btn">Refresh</button></div>
       <div class="history-table">
-        ${appState.history.length ? `<table><thead><tr><th>Program</th><th>Started</th><th>Watered</th><th>Result</th></tr></thead><tbody>${appState.history.map((entry) => `<tr><td>${escapeHtml(entry.name)}</td><td>${entry.started_at ? new Date(entry.started_at * 1000).toLocaleString() : "-"}</td><td>${formatClock(entry.watered_seconds)}</td><td>${escapeHtml(entry.result)}</td></tr>`).join("")}</tbody></table>` : `<p class="empty-message">No completed runs yet.</p>`}
+        ${appState.history.length ? `<table><thead><tr><th>Program</th><th>Zone</th><th>Position</th><th>Started</th><th>Watered</th><th>Result</th><th>Commanded zones</th></tr></thead><tbody>${rows}</tbody></table>` : `<p class="empty-message">No zone activity recorded yet.</p>`}
+      </div>
+      <div class="panel-footer history-footer">
+        <span>${appState.history.length} of ${appState.historyTotal} zone intervals</span>
+        <button id="load-older-history" class="btn" ${appState.historyNextOffset === null ? "disabled" : ""}>Load older</button>
+      </div>
+      <p class="notice">Commanded-zone masks use zone IDs as bits and help distinguish scheduler commands from relay hardware behavior.</p>
+    </article>
+    <article class="panel">
+      <div class="panel-header"><h2>Recent Runs</h2></div>
+      <div class="history-table">
+        ${appState.runHistory.length ? `<table><thead><tr><th>Program</th><th>Started</th><th>Watered</th><th>Result</th></tr></thead><tbody>${runRows}</tbody></table>` : `<p class="empty-message">No completed runs yet.</p>`}
+      </div>
+      <div class="panel-footer history-footer">
+        <span>${appState.runHistory.length} of ${appState.runHistoryTotal} runs</span>
+        <button id="load-older-runs" class="btn" ${appState.runHistoryNextOffset === null ? "disabled" : ""}>Load older</button>
       </div>
     </article>`;
-  document.getElementById("refresh-history").onclick = loadHistory;
+  document.getElementById("refresh-history").onclick = () => loadHistory(true);
+  document.getElementById("load-older-history").onclick = () => loadHistory(false);
+  document.getElementById("load-older-runs").onclick = loadOlderRuns;
+  updateHistoryRuntime();
+}
+
+function updateHistoryRuntime() {
+  const elapsed = Math.max(0, monotonicNow() - appState.historyReceivedAt);
+  document.querySelectorAll("[data-activity-duration]").forEach((cell) => {
+    if (cell.dataset.active !== "1") return;
+    const wateredMs = (Number(cell.dataset.wateredMs) || 0) + elapsed;
+    setText(cell, `Currently running · ${formatClock(wateredMs / 1000)}`);
+  });
 }
 
 function renderSettings() {
@@ -1175,6 +1230,7 @@ async function fetchStatusSnapshot() {
 }
 
 function applyStatusSnapshot({ status, sampledAt }) {
+  const wasActive = Boolean(appState.status?.active);
   appState.status = status;
   appState.statusReceivedAt = sampledAt;
   applyWeatherCapabilities(status.weather?.capabilities);
@@ -1187,6 +1243,7 @@ function applyStatusSnapshot({ status, sampledAt }) {
     : "Connected · Wi-Fi unavailable");
   appState.statusFailures = 0;
   updateRuntime();
+  if (appState.tab === "history" && wasActive && !status.active) void loadHistory(true);
 }
 
 async function loadSettledStatus(predicate = statusHasSettled, timeoutMs = 4000) {
@@ -1240,13 +1297,51 @@ function scheduleStatusPoll() {
   }, backoff);
 }
 
-async function loadHistory() {
+async function loadHistory(reset = true) {
+  if (appState.historyLoading) return;
+  appState.historyLoading = true;
   try {
-    const payload = await api("history");
-    appState.history = payload.history || [];
+    const offset = reset ? 0 : appState.historyNextOffset;
+    if (!reset && offset === null) return;
+    const [payload, runs] = await Promise.all([
+      api("activity", { params: { offset, limit: 10 } }),
+      reset ? api("history", { params: { offset: 0, limit: 10 } }) : Promise.resolve(null),
+    ]);
+    const activity = Array.isArray(payload.activity) ? payload.activity : [];
+    appState.history = reset ? activity : [...appState.history, ...activity];
+    appState.historyReceivedAt = monotonicNow();
+    appState.historyNextOffset = payload.next_offset === null || payload.next_offset === undefined
+      ? null : Number(payload.next_offset);
+    appState.historyTotal = Number(payload.total) || 0;
+    if (runs) {
+      appState.runHistory = Array.isArray(runs.history) ? runs.history : [];
+      appState.runHistoryNextOffset = runs.next_offset === null || runs.next_offset === undefined
+        ? null : Number(runs.next_offset);
+      appState.runHistoryTotal = Number(runs.total) || 0;
+    }
     renderHistory();
   } catch (error) {
     toast(error.message, true);
+  } finally {
+    appState.historyLoading = false;
+  }
+}
+
+async function loadOlderRuns() {
+  if (appState.historyLoading || appState.runHistoryNextOffset === null) return;
+  appState.historyLoading = true;
+  try {
+    const payload = await api("history", { params: { offset: appState.runHistoryNextOffset, limit: 10 } });
+    const runs = Array.isArray(payload.history) ? payload.history : [];
+    appState.runHistory = [...appState.runHistory, ...runs];
+    appState.runHistoryNextOffset = payload.next_offset === null || payload.next_offset === undefined
+      ? null : Number(payload.next_offset);
+    appState.runHistoryTotal = Number(payload.total) || 0;
+    renderHistory();
+  } catch (error) {
+    toast(error.message, true);
+  } finally {
+    appState.historyLoading = false;
   }
 }
 
@@ -1266,10 +1361,14 @@ async function init() {
   scheduleStatusPoll();
   setInterval(() => {
     if (appState.status?.active) updateRuntime();
+    if (appState.tab === "history") updateHistoryRuntime();
   }, 250);
   setInterval(() => {
     if (appState.tab === "settings") loadSystem();
   }, 10000);
+  setInterval(() => {
+    if (appState.tab === "history" && appState.status?.active) loadHistory(true);
+  }, 3000);
 }
 
 if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", init);

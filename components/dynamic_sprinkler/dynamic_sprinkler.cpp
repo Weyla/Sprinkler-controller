@@ -6,6 +6,7 @@
 #include <esp_heap_caps.h>
 #include <algorithm>
 #include <atomic>
+#include <cinttypes>
 #include <cmath>
 #include <cstring>
 #include <memory>
@@ -31,6 +32,7 @@ struct WebRequestJob {
   std::string key;
   std::string type;
   std::string offset;
+  std::string limit;
   int response_code{500};
   std::string response_body{"{\"error\":\"request was not processed\"}"};
   std::atomic<uint8_t> state{0};  // 0 queued, 1 processing, 2 cancelled.
@@ -200,7 +202,7 @@ void DynamicSprinkler::setup() {
   track(3, this->rain_rate_);
   track(4, this->daily_temp_);
   web_server_base::global_web_server_base->add_handler(this);
-  this->turn_all_off_();
+  this->turn_all_off_(ActivityStopReason::STOPPED, true);
   this->publish_selected_enabled_();
   this->set_decision_("Dynamic scheduler ready");
   this->publish_status_(true);
@@ -240,6 +242,12 @@ void DynamicSprinkler::load_store_() {
         global_preferences->make_preference<std::array<uint8_t, HISTORY_BLOB_SIZE>>(PREF_BASE + 0x700 + i);
     if (!this->load_serialized_history_(i)) this->history_[i] = {};
   }
+  this->serialized_activity_pref_ =
+      global_preferences->make_preference<std::array<uint8_t, ACTIVITY_BLOB_SIZE>>(PREF_BASE + 0xA00);
+  if (!this->load_serialized_activity_()) {
+    this->activity_store_ = ActivityStore{};
+    this->activity_store_.marker = ACTIVITY_STORE_MARKER;
+  }
   this->serialized_zone_names_pref_ =
       global_preferences->make_preference<std::array<uint8_t, ZONE_NAMES_BLOB_SIZE>>(PREF_BASE + 0x800);
   const bool names_loaded = this->load_serialized_zone_names_();
@@ -275,6 +283,7 @@ bool DynamicSprinkler::save_schedule_(uint8_t slot) {
   return this->save_serialized_schedule_(slot, this->schedules_[slot]);
 }
 bool DynamicSprinkler::save_history_(uint8_t slot) { return this->save_serialized_history_(slot); }
+bool DynamicSprinkler::save_activity_() { return this->save_serialized_activity_(); }
 bool DynamicSprinkler::save_weather_settings_() { return this->save_serialized_weather_(); }
 
 bool DynamicSprinkler::sync_preferences_() {
@@ -335,6 +344,66 @@ bool DynamicSprinkler::load_serialized_history_(uint8_t slot) {
   decoded.name[sizeof(decoded.name) - 1] = '\0'; decoded.result[sizeof(decoded.result) - 1] = '\0';
   if (!reader.ok() || (decoded.marker != 0 && decoded.marker != HISTORY_MARKER)) return false;
   this->history_[slot] = decoded;
+  return true;
+}
+
+bool DynamicSprinkler::save_serialized_activity_() {
+  std::array<uint8_t, ACTIVITY_BLOB_SIZE> blob{};
+  StorageWriter writer(blob.data(), blob.size());
+  writer.u32(0x44534143); writer.u16(1); writer.u16(0); writer.u32(0);
+  writer.u32(this->activity_store_.marker);
+  writer.u8(this->activity_store_.head);
+  writer.u8(this->activity_store_.count);
+  for (const auto &entry : this->activity_store_.records) {
+    writer.u32(entry.marker);
+    writer.u32(entry.run_id);
+    writer.u32(entry.schedule_id);
+    writer.u32(entry.started_at);
+    writer.u32(entry.ended_at);
+    writer.u32(entry.watered_ms);
+    writer.u32(entry.commanded_on);
+    writer.u32(entry.commanded_off);
+    writer.u8(entry.zone_id);
+    writer.u8(entry.round);
+    writer.u8(entry.row);
+    writer.u8(entry.manual);
+    writer.u8((uint8_t) entry.reason);
+  }
+  return finish_blob(blob, writer) && this->serialized_activity_pref_.save(&blob);
+}
+
+bool DynamicSprinkler::load_serialized_activity_() {
+  std::array<uint8_t, ACTIVITY_BLOB_SIZE> blob{};
+  if (!this->serialized_activity_pref_.load(&blob)) return false;
+  StorageReader reader(nullptr, 0);
+  if (!open_blob(blob, 0x44534143, 1, reader)) return false;
+  ActivityStore decoded{};
+  decoded.marker = reader.u32();
+  decoded.head = reader.u8();
+  decoded.count = reader.u8();
+  for (auto &entry : decoded.records) {
+    entry.marker = reader.u32();
+    entry.run_id = reader.u32();
+    entry.schedule_id = reader.u32();
+    entry.started_at = reader.u32();
+    entry.ended_at = reader.u32();
+    entry.watered_ms = reader.u32();
+    entry.commanded_on = reader.u32();
+    entry.commanded_off = reader.u32();
+    entry.zone_id = reader.u8();
+    entry.round = reader.u8();
+    entry.row = reader.u8();
+    entry.manual = reader.u8();
+    entry.reason = (ActivityStopReason) reader.u8();
+    if (entry.marker != 0 &&
+        (entry.marker != ACTIVITY_MARKER || entry.run_id == 0 || entry.zone_id == 0 || entry.zone_id > MAX_ZONES ||
+         entry.reason > ActivityStopReason::STOPPED))
+      return false;
+  }
+  if (!reader.ok() || decoded.marker != ACTIVITY_STORE_MARKER || decoded.head >= ACTIVITY_SIZE ||
+      decoded.count > ACTIVITY_SIZE)
+    return false;
+  this->activity_store_ = decoded;
   return true;
 }
 
@@ -889,6 +958,7 @@ bool DynamicSprinkler::start_program_(const ScheduleRecord &program, bool manual
   this->active_row_index_ = 0;
   this->active_round_index_ = 0;
   this->run_started_ms_ = millis();
+  this->active_run_id_ = this->meta_.next_run_id == 0 ? 1 : this->meta_.next_run_id;
   if (++this->run_sequence_ == 0) this->run_sequence_ = 1;
   this->watered_seconds_ = 0;
   this->manual_run_ = manual;
@@ -1003,7 +1073,7 @@ void DynamicSprinkler::finish_row_() {
   if (this->state_ == RunState::RUNNING) {
     this->watered_seconds_ += (millis() - this->state_started_ms_) / 1000UL;
   }
-  this->turn_all_off_();
+  this->turn_all_off_(ActivityStopReason::COMPLETED);
   const auto &row = this->active_program_.rows[this->active_row_index_];
   const bool more_work = this->active_row_index_ + 1 < this->active_program_.row_count ||
                          this->active_round_index_ + 1 < this->active_program_.rounds;
@@ -1020,7 +1090,7 @@ void DynamicSprinkler::finish_row_() {
 }
 
 void DynamicSprinkler::finish_program_(const char *result) {
-  this->turn_all_off_();
+  this->turn_all_off_(ActivityStopReason::COMPLETED, true);
   this->add_history_(result);
   this->state_ = RunState::IDLE;
   this->active_schedule_id_ = 0;
@@ -1031,14 +1101,79 @@ void DynamicSprinkler::finish_program_(const char *result) {
   this->publish_status_(true);
 }
 
-void DynamicSprinkler::turn_all_off_() {
-  for (auto *relay : this->relays_)
-    if (relay != nullptr && relay->state) relay->turn_off();
+void DynamicSprinkler::turn_all_off_(ActivityStopReason reason, bool force) {
+  for (size_t i = 0; i < this->relays_.size(); i++) {
+    auto *relay = this->relays_[i];
+    if (relay != nullptr && (force || relay->state)) relay->turn_off();
+    if (i < this->zone_ids_.size()) this->stop_zone_activity_(this->zone_ids_[i], reason);
+  }
 }
 
 void DynamicSprinkler::turn_zone_on_(uint8_t zone) {
   const int index = this->zone_index_(zone);
-  if (index >= 0 && this->relays_[index] != nullptr) this->relays_[index]->turn_on();
+  if (index >= 0 && this->relays_[index] != nullptr) {
+    this->relays_[index]->turn_on();
+    this->start_zone_activity_(zone);
+  }
+}
+
+uint32_t DynamicSprinkler::commanded_zone_bitmap_() const {
+  uint32_t bitmap = 0;
+  for (size_t i = 0; i < this->relays_.size() && i < this->zone_ids_.size(); i++) {
+    const uint8_t zone_id = this->zone_ids_[i];
+    if (zone_id >= 1 && zone_id <= 32 && this->relays_[i] != nullptr && this->relays_[i]->state)
+      bitmap |= 1UL << (zone_id - 1);
+  }
+  return bitmap;
+}
+
+void DynamicSprinkler::start_zone_activity_(uint8_t zone) {
+  if (this->active_run_id_ == 0 || zone == 0 || zone > MAX_ZONES) return;
+  const uint8_t slot = this->activity_store_.head % ACTIVITY_SIZE;
+  auto &entry = this->activity_store_.records[slot];
+  if (entry.marker == ACTIVITY_MARKER && entry.reason == ActivityStopReason::NONE)
+    ESP_LOGW(TAG, "Overwriting unfinished activity event for run %u zone %u", entry.run_id, entry.zone_id);
+  entry = {};
+  entry.marker = ACTIVITY_MARKER;
+  entry.run_id = this->active_run_id_;
+  entry.schedule_id = this->active_schedule_id_;
+  auto now = this->time_ == nullptr ? ESPTime{} : this->time_->now();
+  entry.started_at = now.is_valid() ? now.timestamp : 0;
+  entry.commanded_on = this->commanded_zone_bitmap_();
+  entry.zone_id = zone;
+  entry.round = this->active_round_index_ + 1;
+  entry.row = this->active_row_index_ + 1;
+  entry.manual = this->manual_run_;
+  this->activity_started_ms_[slot] = millis();
+  this->activity_store_.head = (slot + 1) % ACTIVITY_SIZE;
+  if (this->activity_store_.count < ACTIVITY_SIZE) this->activity_store_.count++;
+  ESP_LOGI(TAG, "Run %u round %u row %u zone %u ON commanded=0x%08" PRIX32, entry.run_id, entry.round,
+           entry.row, entry.zone_id, entry.commanded_on);
+}
+
+void DynamicSprinkler::stop_zone_activity_(uint8_t zone, ActivityStopReason reason) {
+  if (zone == 0 || zone > MAX_ZONES || this->activity_store_.count == 0) return;
+  for (uint8_t offset = 0; offset < this->activity_store_.count; offset++) {
+    const uint8_t slot = (this->activity_store_.head + ACTIVITY_SIZE - 1 - offset) % ACTIVITY_SIZE;
+    auto &entry = this->activity_store_.records[slot];
+    if (entry.marker != ACTIVITY_MARKER || entry.run_id != this->active_run_id_ || entry.zone_id != zone ||
+        entry.reason != ActivityStopReason::NONE)
+      continue;
+    auto now = this->time_ == nullptr ? ESPTime{} : this->time_->now();
+    entry.ended_at = now.is_valid() ? now.timestamp : 0;
+    entry.watered_ms = millis() - this->activity_started_ms_[slot];
+    entry.commanded_off = this->commanded_zone_bitmap_();
+    entry.reason = reason;
+    ESP_LOGI(TAG, "Run %u round %u row %u zone %u OFF after %" PRIu32 "ms commanded=0x%08" PRIX32,
+             entry.run_id, entry.round, entry.row, entry.zone_id, entry.watered_ms, entry.commanded_off);
+    return;
+  }
+}
+
+const HistoryRecord *DynamicSprinkler::history_for_run_(uint32_t run_id) const {
+  for (const auto &entry : this->history_)
+    if (entry.marker == HISTORY_MARKER && entry.run_id == run_id) return &entry;
+  return nullptr;
 }
 
 bool DynamicSprinkler::relay_expected_(uint8_t zone) const {
@@ -1068,8 +1203,9 @@ void DynamicSprinkler::check_safety() {
 void DynamicSprinkler::emergency_stop(const std::string &reason) {
   if (this->state_ == RunState::RUNNING)
     this->watered_seconds_ += (millis() - this->state_started_ms_) / 1000UL;
-  if (this->state_ != RunState::IDLE) this->add_history_(reason.c_str());
-  this->turn_all_off_();
+  const bool active = this->state_ != RunState::IDLE;
+  this->turn_all_off_(ActivityStopReason::STOPPED, true);
+  if (active) this->add_history_(reason.c_str());
   this->state_ = RunState::IDLE;
   this->active_schedule_id_ = 0;
   this->active_round_index_ = 0;
@@ -1086,7 +1222,7 @@ bool DynamicSprinkler::pause() {
                                    : 0;
   if (this->paused_remaining_ms_ == 0) return false;
   this->watered_seconds_ += (now_ms - this->state_started_ms_) / 1000UL;
-  this->turn_all_off_();
+  this->turn_all_off_(ActivityStopReason::PAUSED);
   this->state_ = RunState::PAUSED;
   this->set_decision_("Paused");
   this->publish_status_(true);
@@ -1105,7 +1241,7 @@ bool DynamicSprinkler::skip_row() {
   if (this->state_ == RunState::IDLE) return false;
   if (this->state_ == RunState::RUNNING)
     this->watered_seconds_ += (millis() - this->state_started_ms_) / 1000UL;
-  this->turn_all_off_();
+  this->turn_all_off_(ActivityStopReason::SKIPPED);
   this->active_row_index_++;
   this->set_decision_("Row skipped manually");
   this->prepare_next_row_();
@@ -1172,7 +1308,9 @@ void DynamicSprinkler::add_history_(const char *result) {
   auto &entry = this->history_[slot];
   entry = {};
   entry.marker = HISTORY_MARKER;
-  entry.run_id = this->meta_.next_run_id++;
+  entry.run_id = this->active_run_id_ == 0 ? this->meta_.next_run_id : this->active_run_id_;
+  this->meta_.next_run_id = entry.run_id + 1;
+  if (this->meta_.next_run_id == 0) this->meta_.next_run_id = 1;
   entry.schedule_id = this->active_schedule_id_;
   auto now = this->time_->now();
   entry.ended_at = now.is_valid() ? now.timestamp : 0;
@@ -1182,10 +1320,12 @@ void DynamicSprinkler::add_history_(const char *result) {
   std::strncpy(entry.name, this->active_program_.name, sizeof(entry.name) - 1);
   std::strncpy(entry.result, result, sizeof(entry.result) - 1);
   bool queued = this->save_history_(slot);
+  queued = this->save_activity_() && queued;
   queued = this->save_meta_() && queued;
   const bool persisted = this->sync_preferences_();
   if (!queued || !persisted)
     ESP_LOGE(TAG, "Failed to persist completed run %u", entry.run_id);
+  this->active_run_id_ = 0;
 }
 
 bool DynamicSprinkler::parse_program_(const std::string &data, ScheduleRecord &out, bool require_identity,
@@ -1407,6 +1547,7 @@ std::string DynamicSprinkler::status_json_() const {
     root["active"] = this->is_active();
     root["manual"] = this->manual_run_;
     root["schedule_id"] = this->active_schedule_id_;
+    root["run_id"] = this->is_active() ? this->active_run_id_ : 0;
     root["name"] = this->is_active() ? this->active_program_.name : "";
     root["row"] = this->is_active()
                       ? std::min<uint8_t>(this->active_row_index_ + 1, this->active_program_.row_count)
@@ -1513,13 +1654,19 @@ std::string DynamicSprinkler::system_json_() const {
   });
 }
 
-std::string DynamicSprinkler::history_json_() const {
+std::string DynamicSprinkler::history_json_(uint8_t offset, uint8_t limit) const {
   return json::build_json([&](JsonObject root) {
     JsonArray items = root["history"].to<JsonArray>();
-    for (uint8_t offset = 0; offset < HISTORY_SIZE; offset++) {
-      const uint8_t slot = (this->meta_.history_head + HISTORY_SIZE - 1 - offset) % HISTORY_SIZE;
+    uint8_t total = 0;
+    for (const auto &entry : this->history_)
+      if (entry.marker == HISTORY_MARKER) total++;
+    uint8_t seen = 0;
+    uint8_t returned = 0;
+    for (uint8_t ring_offset = 0; ring_offset < HISTORY_SIZE && returned < limit; ring_offset++) {
+      const uint8_t slot = (this->meta_.history_head + HISTORY_SIZE - 1 - ring_offset) % HISTORY_SIZE;
       const auto &entry = this->history_[slot];
       if (entry.marker != HISTORY_MARKER) continue;
+      if (seen++ < offset) continue;
       JsonObject item = items.add<JsonObject>();
       item["id"] = entry.run_id;
       item["schedule_id"] = entry.schedule_id;
@@ -1529,7 +1676,70 @@ std::string DynamicSprinkler::history_json_() const {
       item["ended_at"] = entry.ended_at;
       item["watered_seconds"] = entry.watered_seconds;
       item["result"] = entry.result;
+      returned++;
     }
+    root["offset"] = offset;
+    root["returned"] = returned;
+    root["total"] = total;
+    if ((uint16_t) offset + returned < total) root["next_offset"] = offset + returned;
+    else root["next_offset"] = nullptr;
+  });
+}
+
+std::string DynamicSprinkler::activity_json_(uint8_t offset, uint8_t limit) const {
+  return json::build_json([&](JsonObject root) {
+    JsonArray items = root["activity"].to<JsonArray>();
+    const uint8_t total = this->activity_store_.count;
+    uint8_t returned = 0;
+    const uint32_t now_ms = millis();
+    for (uint8_t ring_offset = offset; ring_offset < total && returned < limit; ring_offset++) {
+      const uint8_t slot = (this->activity_store_.head + ACTIVITY_SIZE - 1 - ring_offset) % ACTIVITY_SIZE;
+      const auto &entry = this->activity_store_.records[slot];
+      if (entry.marker != ACTIVITY_MARKER) continue;
+      const auto *run = this->history_for_run_(entry.run_id);
+      const bool active = entry.reason == ActivityStopReason::NONE && entry.run_id == this->active_run_id_;
+      const char *name = nullptr;
+      if (active) name = this->active_program_.name;
+      else if (run != nullptr) name = run->name;
+      std::string fallback;
+      if (name == nullptr || name[0] == '\0') {
+        fallback = entry.manual ? "Manual run" : str_sprintf("Schedule %" PRIu32, entry.schedule_id);
+        name = fallback.c_str();
+      }
+      const int zone_index = this->zone_index_(entry.zone_id);
+      const char *zone_name = zone_index >= 0 ? this->zone_names_[zone_index].c_str() : "Unknown zone";
+      const char *result = "Stopped";
+      if (active) result = "Currently running";
+      else if (entry.reason == ActivityStopReason::COMPLETED) result = "Completed";
+      else if (entry.reason == ActivityStopReason::PAUSED) result = "Paused";
+      else if (entry.reason == ActivityStopReason::SKIPPED) result = "Skipped";
+      else if (run != nullptr && run->result[0] != '\0') result = run->result;
+      const uint32_t watered_ms =
+          active && this->activity_started_ms_[slot] != 0 ? now_ms - this->activity_started_ms_[slot] : entry.watered_ms;
+      JsonObject item = items.add<JsonObject>();
+      item["run_id"] = entry.run_id;
+      item["schedule_id"] = entry.schedule_id;
+      item["name"] = name;
+      item["manual"] = entry.manual != 0;
+      item["round"] = entry.round;
+      item["row"] = entry.row;
+      item["zone_id"] = entry.zone_id;
+      item["zone_name"] = zone_name;
+      item["started_at"] = entry.started_at;
+      if (active) item["ended_at"] = nullptr;
+      else item["ended_at"] = entry.ended_at;
+      item["watered_ms"] = watered_ms;
+      item["active"] = active;
+      item["result"] = result;
+      item["commanded_on"] = str_sprintf("0x%08" PRIX32, entry.commanded_on);
+      item["commanded_off"] = str_sprintf("0x%08" PRIX32, entry.commanded_off);
+      returned++;
+    }
+    root["offset"] = offset;
+    root["returned"] = returned;
+    root["total"] = total;
+    if ((uint16_t) offset + returned < total) root["next_offset"] = offset + returned;
+    else root["next_offset"] = nullptr;
   });
 }
 
@@ -1564,6 +1774,7 @@ void DynamicSprinkler::handleRequest(AsyncWebServerRequest *request) {
   job->key = request->arg("key");
   job->type = request->arg("type");
   job->offset = request->arg("offset");
+  job->limit = request->arg("limit");
 
 #ifdef USE_ESP32
   if (job->done == nullptr) {
@@ -1613,6 +1824,17 @@ void DynamicSprinkler::process_web_request_(WebRequestJob &job) {
     value = (uint32_t) parsed;
     return true;
   };
+  auto parse_page = [](const std::string &text, uint8_t fallback, uint8_t maximum, bool allow_zero, uint8_t &value) {
+    if (text.empty()) {
+      value = fallback;
+      return true;
+    }
+    char *end = nullptr;
+    const unsigned long parsed = strtoul(text.c_str(), &end, 10);
+    if (end == text.c_str() || *end != '\0' || parsed > maximum || (!allow_zero && parsed == 0)) return false;
+    value = (uint8_t) parsed;
+    return true;
+  };
 
   if (!job.post && job.path == "/sprinkler/api/schedules") {
     send_json(200, this->schedules_json_());
@@ -1634,7 +1856,23 @@ void DynamicSprinkler::process_web_request_(WebRequestJob &job) {
     return;
   }
   if (!job.post && job.path == "/sprinkler/api/history") {
-    send_json(200, this->history_json_());
+    uint8_t offset = 0;
+    uint8_t limit = 10;
+    if (!parse_page(job.offset, 0, HISTORY_SIZE, true, offset) || !parse_page(job.limit, 10, 10, false, limit)) {
+      send_error(409, "history pagination is invalid");
+      return;
+    }
+    send_json(200, this->history_json_(offset, limit));
+    return;
+  }
+  if (!job.post && job.path == "/sprinkler/api/activity") {
+    uint8_t offset = 0;
+    uint8_t limit = 10;
+    if (!parse_page(job.offset, 0, ACTIVITY_SIZE, true, offset) || !parse_page(job.limit, 10, 10, false, limit)) {
+      send_error(409, "activity pagination is invalid");
+      return;
+    }
+    send_json(200, this->activity_json_(offset, limit));
     return;
   }
   if (!job.post && job.path == "/sprinkler/api/system") {

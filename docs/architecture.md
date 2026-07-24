@@ -32,12 +32,15 @@ need separate asset files or a runtime Internet connection.
 | Rounds per schedule | 10 |
 | Simultaneous zones per row | 3 |
 | Run-history entries | 32 |
+| Detailed zone-activity intervals | 64 |
 
 Fixed arrays bound long-running memory use. Records are encoded field by field
 with a magic value, schema version, payload length, and CRC32. Separate NVS
-keys store metadata, schedules, history, zone names, weather settings, and the
-last claimed automatic trigger. Writes happen only after changes or completed
-runs; status polling and browser countdowns do not write flash.
+keys store metadata, schedules, history, detailed zone activity, zone names,
+weather settings, and the last claimed automatic trigger. Zone start/stop
+events remain in RAM during a run and the rolling activity trace is committed
+once with the completed run, avoiding a flash write per relay transition.
+Status polling and browser countdowns do not write flash.
 
 Schedule IDs are monotonic, and revisions reject stale browser updates. Zone
 records use stable `zone_id` values rather than YAML positions. Only the current
@@ -62,6 +65,8 @@ saved remaining time.
 - Actual watered time excludes pauses, weather waits, and row delays.
 - The relay guard stops unexpected outputs, more than three active relays, or
   a row exceeding its deadline tolerance.
+- Boot, normal completion, and emergency stop issue an unconditional final OFF
+  command to every configured relay, even when software already reports it off.
 
 Clock triggers store local minute-of-day. Solar triggers store sunrise/sunset
 plus a signed offset from -360 to +360 minutes. Adjacent dates are checked for
@@ -99,12 +104,15 @@ require `X-Sprinkler-Request: 1`.
 | GET | `/sprinkler/api/status` | Cached live controller state |
 | GET | `/sprinkler/api/solar` | Resolve a solar preview |
 | POST | `/sprinkler/api/control` | Pause, resume, skip, or stop |
-| GET | `/sprinkler/api/history` | Read persistent history |
+| GET | `/sprinkler/api/history?offset=N&limit=N` | Read paginated run summaries |
+| GET | `/sprinkler/api/activity?offset=N&limit=N` | Read paginated zone activity |
 | GET | `/sprinkler/api/system` | Read health and settings |
 | POST | `/sprinkler/api/settings` | Change controller settings |
 
-The browser polls every ten seconds when idle and every three seconds while a
-run is active, with exponential backoff after errors. It animates timers from
+History and activity responses are limited to ten records per page so they
+remain below ESPHome's 5120-byte JSON serialization ceiling. The browser polls
+status every ten seconds when idle and every three seconds while a run is
+active, with exponential backoff after errors. It animates timers from
 monotonic device samples and updates runtime DOM nodes only when displayed data
 changes.
 

@@ -1031,6 +1031,30 @@ select {
   font-size: 12px;
 }
 
+.history-table td {
+  vertical-align: top;
+  white-space: nowrap;
+}
+
+.history-table code {
+  font-size: 12px;
+}
+
+.table-detail {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.history-footer {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .toast.error {
   border-color: rgba(180, 35, 24, 0.35);
   color: var(--danger);

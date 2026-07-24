@@ -55,8 +55,10 @@ static constexpr uint8_t MAX_ZONES = 32;
 static constexpr uint8_t MAX_ZONES_PER_ROW = 3;
 static constexpr uint8_t MAX_START_TIMES = 8;
 static constexpr uint8_t HISTORY_SIZE = 32;
+static constexpr uint8_t ACTIVITY_SIZE = 64;
 
 enum class TriggerType : uint8_t { CLOCK = 0, SUNRISE = 1, SUNSET = 2 };
+enum class ActivityStopReason : uint8_t { NONE = 0, COMPLETED = 1, PAUSED = 2, SKIPPED = 3, STOPPED = 4 };
 
 struct StartTrigger {
   TriggerType type{TriggerType::CLOCK};
@@ -101,6 +103,29 @@ struct HistoryRecord {
   uint8_t manual{0};
   char name[32]{};
   char result[48]{};
+};
+
+struct ActivityRecord {
+  uint32_t marker{0};
+  uint32_t run_id{0};
+  uint32_t schedule_id{0};
+  uint32_t started_at{0};
+  uint32_t ended_at{0};
+  uint32_t watered_ms{0};
+  uint32_t commanded_on{0};
+  uint32_t commanded_off{0};
+  uint8_t zone_id{0};
+  uint8_t round{0};
+  uint8_t row{0};
+  uint8_t manual{0};
+  ActivityStopReason reason{ActivityStopReason::NONE};
+};
+
+struct ActivityStore {
+  uint32_t marker{0};
+  uint8_t head{0};
+  uint8_t count{0};
+  ActivityRecord records[ACTIVITY_SIZE]{};
 };
 
 struct StoreMeta {
@@ -192,6 +217,8 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
 
   static constexpr uint32_t SCHEDULE_MARKER = 0x53505234;
   static constexpr uint32_t HISTORY_MARKER = 0x48535432;
+  static constexpr uint32_t ACTIVITY_MARKER = 0x41435431;
+  static constexpr uint32_t ACTIVITY_STORE_MARKER = 0x41435331;
   static constexpr uint32_t META_MARKER = 0x4D455432;
   static constexpr uint32_t ZONE_NAMES_MARKER = 0x5A4E4D33;
   static constexpr uint32_t WEATHER_SETTINGS_MARKER = 0x57454131;
@@ -201,6 +228,7 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   static constexpr uint16_t SCHEDULE_BLOB_SIZE = 768;
   static constexpr uint16_t META_BLOB_SIZE = 32;
   static constexpr uint16_t HISTORY_BLOB_SIZE = 128;
+  static constexpr uint16_t ACTIVITY_BLOB_SIZE = 2432;
   static constexpr uint16_t ZONE_NAMES_BLOB_SIZE = 1088;
   static constexpr uint16_t WEATHER_BLOB_SIZE = 32;
   static constexpr int32_t TRIGGER_GRACE_SECONDS = 300;
@@ -214,6 +242,7 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   bool save_meta_();
   bool save_schedule_(uint8_t slot);
   bool save_history_(uint8_t slot);
+  bool save_activity_();
   bool save_weather_settings_();
   bool sync_preferences_();
   bool set_zone_name_(uint8_t zone_id, const std::string &name);
@@ -221,10 +250,12 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   bool save_serialized_schedule_(uint8_t slot, const ScheduleRecord &schedule);
   bool load_serialized_meta_();
   bool load_serialized_history_(uint8_t slot);
+  bool load_serialized_activity_();
   bool load_serialized_zone_names_();
   bool load_serialized_weather_();
   bool save_serialized_meta_();
   bool save_serialized_history_(uint8_t slot);
+  bool save_serialized_activity_();
   bool save_serialized_zone_names_();
   bool save_serialized_weather_();
   int zone_index_(uint8_t zone_id) const;
@@ -251,8 +282,12 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   void begin_row_();
   void finish_row_();
   void finish_program_(const char *result);
-  void turn_all_off_();
+  void turn_all_off_(ActivityStopReason reason = ActivityStopReason::STOPPED, bool force = false);
   void turn_zone_on_(uint8_t zone);
+  void start_zone_activity_(uint8_t zone);
+  void stop_zone_activity_(uint8_t zone, ActivityStopReason reason);
+  uint32_t commanded_zone_bitmap_() const;
+  const HistoryRecord *history_for_run_(uint32_t run_id) const;
   bool relay_expected_(uint8_t zone) const;
   void publish_status_(bool force = false);
   void set_decision_(const std::string &message);
@@ -262,7 +297,8 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   std::string schedules_json_() const;
   std::string schedule_json_(const ScheduleRecord &schedule) const;
   std::string status_json_() const;
-  std::string history_json_() const;
+  std::string history_json_(uint8_t offset, uint8_t limit) const;
+  std::string activity_json_(uint8_t offset, uint8_t limit) const;
   std::string system_json_() const;
   void process_web_request_(WebRequestJob &job);
   void send_json_(AsyncWebServerRequest *request, int code, const std::string &body) const;
@@ -289,12 +325,15 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   uint32_t weather_updated_ms_[5]{};
   ScheduleRecord schedules_[MAX_SCHEDULES]{};
   HistoryRecord history_[HISTORY_SIZE]{};
+  ActivityStore activity_store_{};
+  uint32_t activity_started_ms_[ACTIVITY_SIZE]{};
   StoreMeta meta_{};
   ESPPreferenceObject serialized_schedule_prefs_[MAX_SCHEDULES];
   ZoneNameStore zone_name_store_{};
   WeatherSettingsStore weather_settings_{};
   ESPPreferenceObject serialized_meta_pref_;
   ESPPreferenceObject serialized_history_prefs_[HISTORY_SIZE];
+  ESPPreferenceObject serialized_activity_pref_;
   ESPPreferenceObject serialized_zone_names_pref_;
   ESPPreferenceObject serialized_weather_pref_;
 
@@ -306,6 +345,7 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   uint8_t starting_zone_index_{0};
   uint32_t run_started_ms_{0};
   uint32_t run_sequence_{0};
+  uint32_t active_run_id_{0};
   uint32_t state_started_ms_{0};
   uint32_t state_deadline_ms_{0};
   uint32_t paused_remaining_ms_{0};
