@@ -168,7 +168,7 @@ select:
     initial_option: ${timezone}
     restore_value: true
     optimistic: true
-    set_action:
+    on_value:
       - script.execute: apply_timezone_setting
 
 script:

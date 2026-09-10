@@ -60,9 +60,34 @@ function loadApp(fetchImpl = async () => {
     confirm() { return true; },
   });
   const source = fs.readFileSync(path.join(__dirname, "../web/dynamic_app.js"), "utf8");
-  vm.runInContext(`${source}\n;globalThis.__test = { appState, updateRuntime, statusHasSettled, skipStatusHasSettled, loadHistory, loadOlderRuns, renderHistory };`, context);
+  vm.runInContext(`${source}\n;globalThis.__test = { api, appState, updateRuntime, statusHasSettled, skipStatusHasSettled, loadHistory, loadOlderRuns, renderHistory };`, context);
   return { ...context.__test, document, elements, weather };
 }
+
+test("runtime buttons are visible only for applicable states", () => {
+  const { appState, updateRuntime, elements } = loadApp();
+  for (const [state, visible] of [
+    ["idle", []], ["running", ["pause-run", "skip-row", "stop-run"]],
+    ["paused", ["resume-run", "stop-run"]], ["starting", ["stop-run"]],
+    ["weather_wait", ["stop-run"]], ["delay", ["stop-run"]]
+  ]) {
+    appState.status = { state, active: state !== "idle", zones: [], weather: {} };
+    updateRuntime();
+    for (const id of ["pause-run", "resume-run", "skip-row", "stop-run"])
+      assert.equal(elements.get(id).hidden, !visible.includes(id), state + ": " + id);
+  }
+});
+
+test("import token accompanies JSON-bearing POST requests", async () => {
+  let body;
+  const { api } = loadApp(async (_url, options) => {
+    body = options.body;
+    return { ok: true, json: async () => ({ ok: true }) };
+  });
+  await api("save", { method: "POST", params: { import_token: "session" }, data: { id: 0 } });
+  assert.equal(body.get("import_token"), "session");
+  assert.deepEqual(JSON.parse(body.get("data")), { id: 0 });
+});
 
 test("transient start and expired pre-skip frames are not settled", () => {
   const { statusHasSettled, skipStatusHasSettled } = loadApp();

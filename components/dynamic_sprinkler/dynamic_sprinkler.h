@@ -279,6 +279,8 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   bool start_program_(const ScheduleRecord &program, bool manual, bool enforce_window);
   void prepare_next_row_();
   WeatherResult prepare_weather_();
+  void account_zone_time_(uint32_t now);
+  uint32_t row_remaining_ms_() const;
   void begin_row_();
   void finish_row_();
   void finish_program_(const char *result);
@@ -349,6 +351,16 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   uint32_t state_started_ms_{0};
   uint32_t state_deadline_ms_{0};
   uint32_t paused_remaining_ms_{0};
+  uint32_t zone_remaining_ms_[MAX_ZONES_PER_ROW]{};
+  uint32_t zone_delivered_ms_[MAX_ZONES_PER_ROW]{};
+  uint32_t zone_accounted_ms_[MAX_ZONES_PER_ROW]{};
+  bool zone_running_[MAX_ZONES_PER_ROW]{};
+  bool row_initialized_{false};
+  uint32_t row_target_ms_{0};
+  uint32_t weather_check_ms_{0};
+  uint32_t weather_blocked_since_ms_{0};
+  bool weather_wait_active_{false};
+  uint64_t valve_watered_ms_{0};
   uint32_t watered_seconds_{0};
   uint32_t last_evaluation_ms_{0};
   uint32_t last_status_ms_{0};
@@ -366,6 +378,10 @@ class DynamicSprinkler : public Component, public AsyncWebHandler {
   bool manual_run_{false};
   bool enforce_window_{false};
   bool resuming_{false};
+  bool import_locked_{false};
+  std::string import_token_{};
+  uint32_t import_touched_ms_{0};
+  ESPPreferenceObject import_pref_;
 };
 
 }  // namespace esphome::dynamic_sprinkler

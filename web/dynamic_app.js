@@ -63,7 +63,7 @@ async function api(path, { method = "GET", params = {}, data } = {}) {
   const timeout = setTimeout(() => controller.abort(), method === "POST" ? 15000 : 5000);
   options.signal = controller.signal;
   if (data !== undefined) {
-    const body = new URLSearchParams();
+    const body = new URLSearchParams(params);
     body.set("data", JSON.stringify(data));
     options.body = body;
     options.headers = { "Content-Type": "application/x-www-form-urlencoded;charset=UTF-8" };
@@ -313,10 +313,10 @@ function renderDashboard() {
           </div>
           <div id="runtime-zones" class="active-zone-list"></div>
           <div class="runtime-actions">
-            <button id="pause-run" class="btn">Pause</button>
-            <button id="resume-run" class="btn primary">Resume</button>
-            <button id="skip-row" class="btn">Skip row</button>
-            <button id="stop-run" class="btn danger">Emergency stop</button>
+            <button hidden id="pause-run" class="btn">Pause</button>
+            <button hidden id="resume-run" class="btn primary">Resume</button>
+            <button hidden id="skip-row" class="btn">Skip row</button>
+            <button hidden id="stop-run" class="btn danger">Emergency stop</button>
           </div>
         </div>
       </article>
@@ -395,7 +395,7 @@ function updateRuntime() {
     : Math.max(appState.displayElapsed, rawElapsed);
   const remaining = appState.displayRemaining;
   const elapsed = appState.displayElapsed;
-  const stateLabel = status.state.replaceAll("_", " ");
+  const stateLabel = status.import_locked ? "Import incomplete — retry backup import" : status.state.replaceAll("_", " ");
   const values = {
     "runtime-state": stateLabel,
     "run-summary": status.active ? `${status.name || "Program"} - ${stateLabel}` : "Idle",
@@ -423,10 +423,10 @@ function updateRuntime() {
   const resume = document.getElementById("resume-run");
   const skip = document.getElementById("skip-row");
   const stop = document.getElementById("stop-run");
-  if (pause) pause.disabled = appState.actionInProgress || status.state !== "running";
-  if (resume) resume.disabled = appState.actionInProgress || status.state !== "paused";
-  if (skip) skip.disabled = appState.actionInProgress || !status.active;
-  if (stop) stop.disabled = appState.actionInProgress || !status.active;
+  for (const [button, visible] of [[pause, status.state === "running"], [resume, status.state === "paused"],
+      [skip, status.state === "running"], [stop, !!status.active]]) {
+    if (button) { button.hidden = !visible; button.disabled = appState.actionInProgress || !visible; }
+  }
   document.getElementById("current-run-panel")?.classList.toggle("is-idle", !status.active);
   const summary = document.getElementById("run-summary");
   if (summary) summary.hidden = !status.active;
@@ -1129,6 +1129,10 @@ async function exportController() {
 async function importController(event) {
   const input = event.target;
   let locked = false;
+  const importToken = Array.from(crypto.getRandomValues(new Uint32Array(4)), n => n.toString(16).padStart(8, "0")).join("");
+  const importApi = (path, options = {}) => api(path, {
+    ...options, params: { ...options.params, import_token: importToken }
+  });
   try {
     const file = input.files?.[0];
     if (!file) return;
@@ -1173,28 +1177,25 @@ async function importController(event) {
     appState.statusGeneration += 1;
     locked = true;
 
-    const liveStatus = await api("status");
-    if (liveStatus.active) throw new Error("Stop the active run before importing a backup");
-
+    await importApi("import/begin", { method: "POST" });
     const current = await api("schedules");
-    const mutationStatus = await api("status");
-    if (mutationStatus.active) throw new Error("A run started before import; stop it and retry");
-    for (const schedule of current.schedules || []) await api("delete", { method: "POST", params: { id: schedule.id } });
+    for (const schedule of current.schedules || []) await importApi("delete", { method: "POST", params: { id: schedule.id } });
 
-    if (TIMEZONES.includes(settings.timezone)) await api("settings", { method: "POST", params: { setting: "timezone", value: settings.timezone } });
-    if (duration >= 1 && duration <= 60) await api("settings", { method: "POST", params: { setting: "manual_duration", value: duration } });
+    if (TIMEZONES.includes(settings.timezone)) await importApi("settings", { method: "POST", params: { setting: "timezone", value: settings.timezone } });
+    if (duration >= 1 && duration <= 60) await importApi("settings", { method: "POST", params: { setting: "manual_duration", value: duration } });
     for (const zone of importedZones) {
-      if (zone.name && appState.zoneIds.includes(Number(zone.id))) await api("settings", { method: "POST", params: { setting: "zone_name", index: zone.id, value: zone.name } });
+      if (zone.name && appState.zoneIds.includes(Number(zone.id))) await importApi("settings", { method: "POST", params: { setting: "zone_name", index: zone.id, value: zone.name } });
     }
     for (const key of Object.keys(WEATHER_PROTECTIONS)) {
       if (!appState.weatherCapabilities[key]) continue;
-      await api("settings", { method: "POST", params: {
+      await importApi("settings", { method: "POST", params: {
         setting: "weather_protection", key, value: settings.weather_enabled?.[key] ? "on" : "off",
       } });
     }
     for (const schedule of backup.schedules) {
-      await api("save", { method: "POST", data: { ...schedule, id: 0, revision: 0 } });
+      await importApi("save", { method: "POST", data: { ...schedule, id: 0, revision: 0 } });
     }
+    await importApi("import/commit", { method: "POST" });
     appState.editor = null;
     appState.selectedId = 0;
     await Promise.all([loadSchedules(), loadSettledStatus(), loadSystem()]);

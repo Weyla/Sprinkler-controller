@@ -63,6 +63,8 @@ select {
   min-width: 0;
 }
 
+.dynamic-app .runtime-actions button[hidden] { display: none !important; }
+
 #run-summary {
   flex: 0 0 220px;
   width: 220px;
