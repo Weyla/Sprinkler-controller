@@ -13,6 +13,10 @@ esphome:
   project:
     name: weyla.sprinkler-controller
     version: ${sprinkler_version}
+  on_shutdown:
+    priority: 700
+    then:
+      - lambda: id(dynamic_scheduler).emergency_stop("Shutdown safety stop");
   on_boot:
     # Relay restore modes should already request off. This late hook also
     # clears scheduler state after all configured components are available.

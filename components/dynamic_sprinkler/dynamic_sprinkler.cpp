@@ -33,6 +33,7 @@ struct WebRequestJob {
   std::string type;
   std::string offset;
   std::string limit;
+  std::string import_token;
   int response_code{500};
   std::string response_body{"{\"error\":\"request was not processed\"}"};
   std::atomic<uint8_t> state{0};  // 0 queued, 1 processing, 2 cancelled.
@@ -189,6 +190,8 @@ void DynamicZoneButton::press_action() {
 
 void DynamicSprinkler::setup() {
   this->load_store_();
+  this->import_pref_ = global_preferences->make_preference<bool>(PREF_BASE + 0xB00);
+  this->import_pref_.load(&this->import_locked_);
   this->update_zone_button_names_();
   auto track = [this](uint8_t index, sensor::Sensor *source) {
     if (source == nullptr) return;
@@ -851,6 +854,22 @@ void DynamicSprinkler::loop() {
   }
   if (now_ms - this->last_status_ms_ >= 1000) this->publish_status_();
   this->check_safety();
+  if (this->state_ == RunState::STARTING || this->state_ == RunState::RUNNING) {
+    this->account_zone_time_(now_ms);
+    if (now_ms - this->weather_check_ms_ >= 1000) {
+      this->weather_check_ms_ = now_ms;
+      const auto weather = this->prepare_weather_();
+      if (weather != WeatherResult::READY) {
+        this->turn_all_off_(weather == WeatherResult::WAIT ? ActivityStopReason::PAUSED : ActivityStopReason::SKIPPED);
+        if (weather == WeatherResult::SKIP) {
+          this->active_row_index_++;
+          this->prepare_next_row_();
+        }
+        this->publish_status_(true);
+        return;
+      }
+    }
+  }
 
   switch (this->state_) {
     case RunState::WEATHER_WAIT:
@@ -872,19 +891,24 @@ void DynamicSprinkler::loop() {
       if ((int32_t) (now_ms - this->state_deadline_ms_) < 0) break;
       const auto &row = this->active_program_.rows[this->active_row_index_];
       if (this->starting_zone_index_ < row.zone_count) {
-        this->turn_zone_on_(row.zones[this->starting_zone_index_++]);
+        const uint8_t index = this->starting_zone_index_++;
+        if (this->zone_remaining_ms_[index] > 0) {
+          this->turn_zone_on_(row.zones[index]);
+          this->zone_running_[index] = true;
+          this->zone_accounted_ms_[index] = now_ms;
+        }
         this->state_deadline_ms_ = now_ms + 250;
       } else {
         this->state_ = RunState::RUNNING;
         this->state_started_ms_ = now_ms;
-        this->state_deadline_ms_ = now_ms + this->paused_remaining_ms_;
+        this->state_deadline_ms_ = now_ms + this->row_remaining_ms_();
         this->resuming_ = false;
         this->publish_status_(true);
       }
       break;
     }
     case RunState::RUNNING:
-      if ((int32_t) (now_ms - this->state_deadline_ms_) >= 0) this->finish_row_();
+      if (this->row_remaining_ms_() == 0) this->finish_row_();
       break;
     case RunState::DELAY:
       if ((int32_t) (now_ms - this->state_deadline_ms_) >= 0) {
@@ -898,7 +922,7 @@ void DynamicSprinkler::loop() {
 }
 
 void DynamicSprinkler::evaluate_schedules_() {
-  if (this->is_active() || this->time_ == nullptr) return;
+  if (this->import_locked_ || this->is_active() || this->time_ == nullptr) return;
   const auto now = this->time_->now();
   if (!now.is_valid()) return;
   if (now.day_of_week < 1 || now.day_of_week > 7 || now.hour > 23 || now.minute > 59 || now.second > 59) return;
@@ -955,7 +979,9 @@ bool DynamicSprinkler::start_schedule_(uint8_t slot, bool enforce_window) {
 }
 
 bool DynamicSprinkler::start_program_(const ScheduleRecord &program, bool manual, bool enforce_window) {
-  if (this->is_active() || program.row_count == 0) return false;
+  if (this->import_locked_ || this->is_active() || program.row_count == 0) return false;
+  this->valve_watered_ms_ = 0;
+  this->row_initialized_ = false;
   this->active_program_ = program;
   this->active_schedule_id_ = manual ? 0 : program.id;
   this->active_row_index_ = 0;
@@ -974,6 +1000,8 @@ bool DynamicSprinkler::start_program_(const ScheduleRecord &program, bool manual
 
 void DynamicSprinkler::prepare_next_row_() {
   this->turn_all_off_();
+  this->row_initialized_ = false;
+  this->weather_wait_active_ = false;
   while (true) {
     if (this->active_row_index_ >= this->active_program_.row_count) {
       if (this->active_round_index_ + 1 >= this->active_program_.rounds) break;
@@ -1016,9 +1044,9 @@ DynamicSprinkler::WeatherResult DynamicSprinkler::prepare_weather_() {
            now_ms - this->weather_updated_ms_[index] <= stale_ms && std::isfinite(source->state) &&
            (index == 4 || source->state >= 0.0f);
   };
-  const uint32_t elapsed_ms = now_ms - this->run_started_ms_;
+  const uint32_t elapsed_ms = this->weather_wait_active_ ? now_ms - this->weather_blocked_since_ms_ : 0;
   const uint32_t wait_limit_ms = (uint32_t) this->active_program_.max_wait_minutes * 60000UL;
-  const bool window_open = this->enforce_window_ && wait_limit_ms > 0 && elapsed_ms < wait_limit_ms;
+  const bool window_open = wait_limit_ms > 0 && elapsed_ms < wait_limit_ms;
   const char *wait_reason = nullptr;
   if (automatic && this->weather_enabled_(WEATHER_RAIN_RATE) && fresh(3, this->rain_rate_) &&
       this->rain_rate_->state > 0.0f)
@@ -1032,15 +1060,20 @@ DynamicSprinkler::WeatherResult DynamicSprinkler::prepare_weather_() {
       this->wind_gust_->state > row.max_gust_deci / 10.0f)
     wait_reason = "gust above row limit";
   if (wait_reason != nullptr) {
+    if (!this->weather_wait_active_) {
+      this->weather_wait_active_ = true;
+      this->weather_blocked_since_ms_ = now_ms;
+    }
     if (window_open) {
       this->state_ = RunState::WEATHER_WAIT;
-      this->weather_retry_ms_ = now_ms + std::min<uint32_t>(60000UL, wait_limit_ms - elapsed_ms);
+      this->weather_retry_ms_ = now_ms + std::min<uint32_t>(5000UL, wait_limit_ms - elapsed_ms);
       this->set_decision_(std::string("Waiting: ") + wait_reason);
       return WeatherResult::WAIT;
     }
     this->set_decision_(std::string("Row skipped: ") + wait_reason);
     return WeatherResult::SKIP;
   }
+  this->weather_wait_active_ = false;
   if (automatic && this->weather_enabled_(WEATHER_RAIN_24H) && row.rain_target_deci > 0 &&
       fresh(2, this->rain_24h_)) {
     const float target = row.rain_target_deci / 10.0f;
@@ -1059,8 +1092,25 @@ DynamicSprinkler::WeatherResult DynamicSprinkler::prepare_weather_() {
   const uint32_t rounds = std::max<uint8_t>(1, this->active_program_.rounds);
   const uint32_t adjusted_ms = (uint32_t) std::max((float) rounds * 1000.0f,
                                                    std::min(3600000.0f, adjusted * 1000.0f));
-  this->paused_remaining_ms_ = adjusted_ms / rounds +
-                               (this->active_round_index_ < adjusted_ms % rounds ? 1 : 0);
+  const uint32_t target = adjusted_ms / rounds +
+                          (this->active_round_index_ < adjusted_ms % rounds ? 1 : 0);
+  if (!this->row_initialized_) {
+    this->row_target_ms_ = target;
+    for (uint8_t i = 0; i < MAX_ZONES_PER_ROW; i++) {
+      this->zone_remaining_ms_[i] = i < row.zone_count ? target : 0;
+      this->zone_delivered_ms_[i] = 0;
+      this->zone_running_[i] = false;
+    }
+    this->row_initialized_ = true;
+  } else {
+    // Weather can shorten this occurrence, never add time already removed.
+    this->row_target_ms_ = std::min(this->row_target_ms_, target);
+    for (uint8_t i = 0; i < row.zone_count; i++)
+      this->zone_remaining_ms_[i] = this->row_target_ms_ > this->zone_delivered_ms_[i]
+          ? this->row_target_ms_ - this->zone_delivered_ms_[i] : 0;
+  }
+  this->paused_remaining_ms_ = this->row_remaining_ms_();
+  if (this->state_ == RunState::RUNNING) this->state_deadline_ms_ = now_ms + this->paused_remaining_ms_;
   return WeatherResult::READY;
 }
 
@@ -1073,9 +1123,6 @@ void DynamicSprinkler::begin_row_() {
 }
 
 void DynamicSprinkler::finish_row_() {
-  if (this->state_ == RunState::RUNNING) {
-    this->watered_seconds_ += (millis() - this->state_started_ms_) / 1000UL;
-  }
   this->turn_all_off_(ActivityStopReason::COMPLETED);
   const auto &row = this->active_program_.rows[this->active_row_index_];
   const bool more_work = this->active_row_index_ + 1 < this->active_program_.row_count ||
@@ -1104,7 +1151,36 @@ void DynamicSprinkler::finish_program_(const char *result) {
   this->publish_status_(true);
 }
 
+uint32_t DynamicSprinkler::row_remaining_ms_() const {
+  uint32_t remaining = 0;
+  for (uint32_t value : this->zone_remaining_ms_) remaining = std::max(remaining, value);
+  return remaining;
+}
+
+void DynamicSprinkler::account_zone_time_(uint32_t now) {
+  if (!this->row_initialized_ || this->active_row_index_ >= this->active_program_.row_count) return;
+  const auto &row = this->active_program_.rows[this->active_row_index_];
+  for (uint8_t i = 0; i < row.zone_count; i++) {
+    if (!this->zone_running_[i]) continue;
+    const uint32_t on_ms = now - this->zone_accounted_ms_[i];
+    this->zone_accounted_ms_[i] = now;
+    this->zone_delivered_ms_[i] += on_ms;
+    this->valve_watered_ms_ += on_ms;
+    this->zone_remaining_ms_[i] = on_ms < this->zone_remaining_ms_[i] ? this->zone_remaining_ms_[i] - on_ms : 0;
+    if (this->zone_remaining_ms_[i] == 0) {
+      const int index = this->zone_index_(row.zones[i]);
+      if (index >= 0 && this->relays_[index] != nullptr) this->relays_[index]->turn_off();
+      this->stop_zone_activity_(row.zones[i], ActivityStopReason::COMPLETED);
+      this->zone_running_[i] = false;
+    }
+  }
+  this->watered_seconds_ = this->valve_watered_ms_ / 1000UL;
+  this->paused_remaining_ms_ = this->row_remaining_ms_();
+}
+
 void DynamicSprinkler::turn_all_off_(ActivityStopReason reason, bool force) {
+  this->account_zone_time_(millis());
+  for (auto &running : this->zone_running_) running = false;
   for (size_t i = 0; i < this->relays_.size(); i++) {
     auto *relay = this->relays_[i];
     if (relay != nullptr && (force || relay->state)) relay->turn_off();
@@ -1183,7 +1259,7 @@ bool DynamicSprinkler::relay_expected_(uint8_t zone) const {
   if (this->state_ != RunState::STARTING && this->state_ != RunState::RUNNING) return false;
   const auto &row = this->active_program_.rows[this->active_row_index_];
   for (uint8_t i = 0; i < row.zone_count; i++)
-    if (row.zones[i] == zone) return true;
+    if (row.zones[i] == zone) return this->zone_running_[i];
   return false;
 }
 
@@ -1204,8 +1280,6 @@ void DynamicSprinkler::check_safety() {
 }
 
 void DynamicSprinkler::emergency_stop(const std::string &reason) {
-  if (this->state_ == RunState::RUNNING)
-    this->watered_seconds_ += (millis() - this->state_started_ms_) / 1000UL;
   const bool active = this->state_ != RunState::IDLE;
   this->turn_all_off_(ActivityStopReason::STOPPED, true);
   if (active) this->add_history_(reason.c_str());
@@ -1219,12 +1293,8 @@ void DynamicSprinkler::emergency_stop(const std::string &reason) {
 
 bool DynamicSprinkler::pause() {
   if (this->state_ != RunState::RUNNING) return false;
-  const uint32_t now_ms = millis();
-  this->paused_remaining_ms_ = (int32_t) (this->state_deadline_ms_ - now_ms) > 0
-                                   ? this->state_deadline_ms_ - now_ms
-                                   : 0;
-  if (this->paused_remaining_ms_ == 0) return false;
-  this->watered_seconds_ += (now_ms - this->state_started_ms_) / 1000UL;
+  this->account_zone_time_(millis());
+  if (this->row_remaining_ms_() == 0) return false;
   this->turn_all_off_(ActivityStopReason::PAUSED);
   this->state_ = RunState::PAUSED;
   this->set_decision_("Paused");
@@ -1235,15 +1305,18 @@ bool DynamicSprinkler::pause() {
 bool DynamicSprinkler::resume() {
   if (this->state_ != RunState::PAUSED || this->paused_remaining_ms_ == 0) return false;
   this->resuming_ = true;
-  this->begin_row_();
-  this->set_decision_("Resuming");
+  const auto weather = this->prepare_weather_();
+  if (weather == WeatherResult::READY) this->begin_row_();
+  else if (weather == WeatherResult::SKIP) {
+    this->active_row_index_++;
+    this->prepare_next_row_();
+  }
+  this->publish_status_(true);
   return true;
 }
 
 bool DynamicSprinkler::skip_row() {
-  if (this->state_ == RunState::IDLE) return false;
-  if (this->state_ == RunState::RUNNING)
-    this->watered_seconds_ += (millis() - this->state_started_ms_) / 1000UL;
+  if (this->state_ != RunState::RUNNING) return false;
   this->turn_all_off_(ActivityStopReason::SKIPPED);
   this->active_row_index_++;
   this->set_decision_("Row skipped manually");
@@ -1548,6 +1621,7 @@ std::string DynamicSprinkler::status_json_() const {
     else if (this->state_ == RunState::PAUSED) state = "paused";
     root["state"] = state;
     root["active"] = this->is_active();
+    root["import_locked"] = this->import_locked_;
     root["manual"] = this->manual_run_;
     root["schedule_id"] = this->active_schedule_id_;
     root["run_id"] = this->is_active() ? this->active_run_id_ : 0;
@@ -1580,7 +1654,7 @@ std::string DynamicSprinkler::status_json_() const {
     if ((this->state_ == RunState::STARTING || this->state_ == RunState::RUNNING) &&
         this->active_row_index_ < this->active_program_.row_count) {
       const auto &row = this->active_program_.rows[this->active_row_index_];
-      for (uint8_t i = 0; i < row.zone_count; i++) zones.add(row.zones[i]);
+      for (uint8_t i = 0; i < row.zone_count; i++) if (this->zone_running_[i]) zones.add(row.zones[i]);
     }
     JsonArray zone_names = root["zone_names"].to<JsonArray>();
     for (const auto &name : this->zone_names_) zone_names.add(name);
@@ -1778,6 +1852,7 @@ void DynamicSprinkler::handleRequest(AsyncWebServerRequest *request) {
   job->type = request->arg("type");
   job->offset = request->arg("offset");
   job->limit = request->arg("limit");
+  job->import_token = request->arg("import_token");
 
 #ifdef USE_ESP32
   if (job->done == nullptr) {
@@ -1909,6 +1984,68 @@ void DynamicSprinkler::process_web_request_(WebRequestJob &job) {
   }
   if (!job.post) {
     send_error(409, "method not allowed");
+    return;
+  }
+  if (job.path == "/sprinkler/api/import/begin") {
+    if (this->is_active()) { send_error(409, "Stop watering before importing"); return; }
+    if (job.import_token.empty() || job.import_token.size() > 64) { send_error(409, "Invalid import token"); return; }
+    if (this->import_locked_ && !this->import_token_.empty() &&
+        job.import_token != this->import_token_ && millis() - this->import_touched_ms_ < 60000UL) {
+      send_error(409, "Another import owns the controller"); return;
+    }
+    this->import_locked_ = true;
+    if (!this->import_pref_.save(&this->import_locked_) || !this->sync_preferences_()) {
+      send_error(500, "Cannot persist import lock; watering remains blocked"); return;
+    }
+    this->import_token_ = job.import_token;
+    this->import_touched_ms_ = millis();
+    send_json(200, "{\"ok\":true}");
+    return;
+  }
+  const bool emergency_request = job.path == "/sprinkler/api/control" && job.action == "stop";
+  if (this->import_locked_ && !emergency_request && job.path != "/sprinkler/api/validate") {
+    if (job.import_token.empty() || job.import_token != this->import_token_) {
+      send_error(409, "Import incomplete: retry the backup import; watering is locked"); return;
+    }
+    this->import_touched_ms_ = millis();
+  }
+  if (job.path == "/sprinkler/api/import/commit") {
+    if (!this->import_locked_ || job.import_token != this->import_token_) {
+      send_error(409, "No matching import"); return;
+    }
+    const auto now = this->time_ == nullptr ? ESPTime{} : this->time_->now();
+    if (!now.is_valid()) { send_error(409, "Valid clock required to finish import without duplicate triggers"); return; }
+    // Claim every occurrence already due in the grace window before releasing
+    // the durable lock. A reboot cannot replay an imported, already-due start.
+    for (uint8_t slot = 0; slot < MAX_SCHEDULES; slot++) {
+      auto &schedule = this->schedules_[slot];
+      if (schedule.marker != SCHEDULE_MARKER) continue;
+      for (int8_t day = -1; day <= 1; day++) {
+        const auto base = local_date_offset(now, day);
+        if (!base.is_valid() || base.day_of_week < 1 || base.day_of_week > 7 ||
+            !(schedule.days_mask & (1U << (base.day_of_week - 1)))) continue;
+        for (uint8_t trigger = 0; trigger < schedule.start_time_count; trigger++) {
+          ESPTime target{};
+          if (!this->resolve_trigger_(schedule.start_triggers[trigger], base, target)) continue;
+          const int64_t late = (int64_t) now.timestamp - target.timestamp;
+          if (late >= 0 && late <= TRIGGER_GRACE_SECONDS)
+            schedule.last_run_keys[trigger] = this->trigger_run_key_(base, trigger);
+        }
+      }
+      if (!this->save_schedule_(slot)) { send_error(500, "Import remains locked: schedule save failed"); return; }
+    }
+    if (!this->sync_preferences_()) { send_error(500, "Import remains locked: commit failed"); return; }
+    const bool unlocked = false;
+    if (!this->import_pref_.save(&unlocked) || !this->sync_preferences_()) {
+      // Restore the lock in the preferences queue as well as RAM.
+      this->import_pref_.save(&this->import_locked_);
+      this->sync_preferences_();
+      send_error(500, "Import remains locked: unlock failed"); return;
+    }
+    this->import_locked_ = false;
+    this->import_token_.clear();
+    this->invalidate_next_schedule_cache_();
+    send_json(200, "{\"ok\":true}");
     return;
   }
   if (job.path == "/sprinkler/api/save") {
